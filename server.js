@@ -15,7 +15,6 @@ const DATA_DIR = path.join(ROOT, "data");
 const UPLOAD_DIR = path.join(DATA_DIR, "uploads");
 const DB_PATH = path.join(DATA_DIR, "pine-agent.sqlite");
 const PORT = Number(process.env.PORT || 3000);
-const HOST = process.env.HOST || "0.0.0.0";
 
 mkdirSync(DATA_DIR, { recursive: true });
 mkdirSync(UPLOAD_DIR, { recursive: true });
@@ -154,7 +153,7 @@ const TASK_TYPES = {
     uploadLabel: "Upload receipts, screenshots, boarding pass, or hotel folio"
   },
   general: {
-    label: "General company task",
+    label: "General request",
     icon: "*",
     accent: "coral",
     summary: "For any call, email, account, company, or form task that does not fit the presets.",
@@ -471,10 +470,11 @@ function createPersonalizedDashboard(type, description, seedValues = {}) {
   const lower = `${description || ""} ${Object.values(seedValues).join(" ")}`.toLowerCase();
   const chosenType = classifyTask(type, description);
 
-  if (/(unitedhealth|united health|unitedhealthcare|uhc)/.test(lower) && /(claim denied|denied claim|bill not covered|not covered|claim|denial)/.test(lower)) {
+  if (isUnitedHealthClaimIntent(lower)) {
     const fields = [
       { key: "memberFullName", label: "Member full name", type: "text", required: true, question: "What is the member's full name?" },
       { key: "dateOfBirth", label: "Date of birth", type: "date", required: true, sensitive: true, question: "What is the member's date of birth?" },
+      { key: "contactEmail", label: "Email", type: "text", required: true, question: "What's the email you used for your UnitedHealthcare member account?" },
       { key: "uhcMemberId", label: "UHC member ID", type: "text", required: true, sensitive: true, question: "What is the UHC member ID?" },
       { key: "claimId", label: "Claim ID", type: "text", required: true, sensitive: true, question: "What is the claim ID?" },
       { key: "dateOfService", label: "Date of service", type: "date", required: true, question: "What was the date of service?" },
@@ -486,7 +486,7 @@ function createPersonalizedDashboard(type, description, seedValues = {}) {
       type: "health_claim",
       label: "UnitedHealthcare claim denial call",
       summary: "Call UnitedHealthcare about a denied claim or bill that was not covered.",
-      uploadLabel: "Upload denial letter, bill, EOB, or claim screenshot",
+      uploadLabel: "Upload denial letter, bill, EOB, or claim screenshot (optional)",
       fields,
       values: makeValues(fields, {
         ...inferFieldValues({ fields, values: {} }, description),
@@ -618,7 +618,7 @@ function createPersonalizedDashboard(type, description, seedValues = {}) {
 function classifyTask(taskType, text) {
   if (taskType && TASK_TYPES[taskType]) return taskType;
   const lower = `${taskType || ""} ${text || ""}`.toLowerCase();
-  if (/(unitedhealth|united health|unitedhealthcare|uhc|claim denied|denied claim|bill not covered|not covered)/.test(lower)) return "general";
+  if (isUnitedHealthClaimIntent(lower)) return "general";
   if (/(epic|refund|return|chargeback|money back|reimburse|unused day|medical issue)/.test(lower)) return "refund";
   if (/(medical bill|hospital bill|clinic bill|doctor bill|itemized|eob|financial assistance)/.test(lower)) return "bill";
   if (/(bill|negotiate|lower|internet|phone|utility|premium)/.test(lower)) return "bill";
@@ -633,8 +633,48 @@ function classifyTask(taskType, text) {
 function createTitle(type, body) {
   const template = TASK_TYPES[type] || TASK_TYPES.general;
   const clean = (body || "").trim().replace(/\s+/g, " ");
+  if (type === "health_claim") return "UnitedHealthcare denied claim call";
   if (clean.length > 4) return clean.length > 62 ? `${clean.slice(0, 59)}...` : clean;
   return template.label;
+}
+
+function normalizedIntentText(text) {
+  return String(text || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function compactIntentText(text) {
+  return normalizedIntentText(text).replace(/\s+/g, "");
+}
+
+function isUnitedHealthClaimIntent(text) {
+  const normalized = normalizedIntentText(text);
+  const compact = compactIntentText(text);
+  if (/\b(uhc demo|uhc claim|callrunner uhc|unitedhealth demo|united healthcare demo)\b/.test(normalized)) return true;
+  const companyHit = /\buhc\b|\bu h c\b/.test(normalized)
+    || /\bunited\b/.test(normalized)
+    || /(united|untied|unitd|unietd|unitehd|unirted|unoted|unoithed|unitred).*(health|helath|hearlth|heath|halth|healthcare|halthcare|insur|insuran|insurance)/.test(normalized)
+    || /(health|helath|hearlth|heath|halth|healthcare|insur|insurance).*(united|untied|unitd|unietd|unitehd|unirted|unoted|unoithed|unitred)/.test(normalized)
+    || /(unitedhealth|unoithedhealth|unitredhealth|unitehdhealth|unitehdhearlth|unitedhelath|unitedheath|unitedhealthcare|unitedhalthcare|untiedhealth|untiedhealthcare|unirtedhealth|unotedhealth|uhc)/.test(compact);
+  const claimHit = /(claim|clami|cliam|rejected|rjected|reject|rejects|rejets|denied|deneid|deny|denial|not covered|not coverd|not covred|bill not|bill wasn|bill wasnt|eob|underpaid|under paid|coverage|cover)/.test(normalized)
+    || /(claim|clami|cliam|rejected|rjected|reject|rejets|denied|deneid|denial|notcovered|notcoverd|notcovred|billnot|underpaid|eob)/.test(compact);
+  return companyHit && claimHit;
+}
+
+function isCancelCallIntent(message) {
+  const normalized = normalizedIntentText(message);
+  const compact = compactIntentText(message);
+  return /(cancel|cancell|cance|calncel|canel|cnacel|cancl|stop|call off|dont call|don t call|remove)/.test(normalized)
+    || /(cancel|cancell|cance|calncel|canel|cnacel|cancl|stop|calloff|dontcall|remove)/.test(compact);
+}
+
+function healthClaimScheduleMessage() {
+  return [
+    "UnitedHealthcare Member Services 866-801-4409 is closed right now. It opens tomorrow, May 29, 2026, at 8:00 a.m. EST.",
+    "",
+    "I scheduled the call for Friday, May 29, 2026 at 8:00 a.m. EST / 5:00 a.m. PST.",
+    "",
+    "I'll let you know when the call is done. You can check the status from this chat."
+  ].join("\n");
 }
 
 function getRequestForUser(requestId, user) {
@@ -712,7 +752,7 @@ function composeFollowup(dashboard, files) {
     return [
       "I checked what this kind of company usually asks for and you gave me enough to build the working file.",
       "",
-      "Next I’ll prep the exact message, phone script, and follow-up checklist. I won’t mark anything done unless there is proof or you confirm it. Type \"run agents\" when you want me to simulate the work."
+      "Next I’ll prep the exact message, phone script, and follow-up checklist. I won’t mark anything done unless there is proof or you confirm it."
     ].join("\n");
   }
   const questions = missing.slice(0, 4).map((field) => `- ${field.question}`).join("\n");
@@ -1017,7 +1057,7 @@ function generateResearchPlanAndArtifacts(requestRecord) {
 
   if (type === "general") {
     research.findings = [
-      `General company tasks work best when the ask is specific, the authorization/account details are ready, and the next action is constrained to one channel.`,
+      `General requests work best when the ask is specific, the authorization/account details are ready, and the next action is constrained to one channel.`,
       `The draft should include desired result, deadline, proof, and fallback escalation.`
     ];
     plan.recommendedOutcome = values.taskGoal || `Complete the requested task with ${company}.`;
@@ -1111,8 +1151,10 @@ function inferFieldValues(dashboard, text) {
     if (provider) updates.providerName = provider[1].trim();
   }
 
-  if (/(unitedhealth|united health|unitedhealthcare|uhc|claim denied|denied claim|bill not covered|not covered)/.test(lower)) {
+  if (isUnitedHealthClaimIntent(lower)) {
     if (date) updates.dateOfService = date[1];
+    const email = String(text || "").match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+    if (email) updates.contactEmail = email[0];
     const member = String(text || "").match(/member(?: id)?\s*[:#-]?\s*([A-Z0-9-]{4,})/i);
     if (member) updates.uhcMemberId = member[1];
     const claim = String(text || "").match(/claim(?: id| number)?\s*[:#-]?\s*([A-Z0-9-]{4,})/i);
@@ -1187,7 +1229,7 @@ function composeChatReply(requestRecord, updatedKeys = [], choseDemo = false) {
   const demoLine = choseDemo ? "I’ll use a GEICO cancellation as the live demo because it shows the full flow cleanly: policy details, cancellation date, replacement coverage, confirmation, and refund follow-up.\n\n" : "";
   const updatedLine = labels.length ? `I reviewed your message and filled the working file with: ${labels.join(", ")}.\n\n` : "";
   if (missing.length === 0) {
-    return `${demoLine}${updatedLine}I have enough to proceed without guessing. Next I’ll research the company rules, draft the exact message, and prep the call script. Type "run agents" when you want me to simulate that work.`;
+    return `${demoLine}${updatedLine}I have enough to proceed without guessing. Next I’ll research the company rules, draft the exact message, and prep the call script.`;
   }
   return `${demoLine}${updatedLine}${composeFollowup(requestRecord.dashboard, requestRecord.files)}`;
 }
@@ -1197,7 +1239,11 @@ function processChatMessage(user, requestId, message) {
   if (!requestRecord) throw httpError(404, "Request not found.");
   addMessage(requestId, "user", message, { kind: "chat" });
 
-  if (/\b(run agents|do the work|let agents work|start working|handle it|proceed with agents|send it|call them|email them)\b/i.test(message)) {
+  if (isCancelCallIntent(message) && (requestRecord.dashboard?.persona === "UHC_CLAIM_DENIAL" || requestRecord.dashboard?.type === "health_claim")) {
+    return cancelScheduledCall(user, requestId, requestRecord);
+  }
+
+  if (/\b(run agents|do the work|let agents work|start working|handle it|proceed with agents|send it|call them|email them|schedule call|schedule the call|schedule a call|schedule it|start the call)\b/i.test(message)) {
     return runAgents(user, requestId);
   }
 
@@ -1250,7 +1296,7 @@ function researchRequest(user, requestId) {
     requestId
   );
   addStatusEvent(requestId, "Ready to send", "Agent research and drafts are ready.");
-  addMessage(requestId, "assistant", "Research is done. I filled the agent-output rows in the table and prepared the email/phone scripts. Say \"run agents\" to simulate sending/calling from here.", { kind: "plan" });
+  addMessage(requestId, "assistant", "Research is done. I filled the agent-output rows in the table and prepared the email/phone scripts.", { kind: "plan" });
   return getRequestForUser(requestId, user);
 }
 
@@ -1266,11 +1312,11 @@ function runAgents(user, requestId) {
   if (requestRecord.dashboard.persona === "UHC_CLAIM_DENIAL") {
     const dashboard = requestRecord.dashboard;
     dashboard.values.callStatus = "Call scheduled";
-    dashboard.values.scheduledCallTime = "2026-05-04T15:00:00Z";
+    dashboard.values.scheduledCallTime = "2026-05-29T12:00:00Z";
     db.prepare("UPDATE requests SET dashboard_json = ?, approved_at = COALESCE(approved_at, ?), status = ?, updated_at = ? WHERE id = ?")
       .run(JSON.stringify(dashboard), now(), "In progress", now(), requestId);
     addStatusEvent(requestId, "In progress", "UnitedHealthcare call scheduled.");
-    addMessage(requestId, "assistant", "I scheduled the call for 2026-05-04T15:00:00Z (8:00 a.m.).", { kind: "call-scheduled" });
+    addMessage(requestId, "assistant", healthClaimScheduleMessage(), { kind: "call-scheduled" });
     return getRequestForUser(requestId, user);
   }
 
@@ -1284,6 +1330,18 @@ function runAgents(user, requestId) {
   addStatusEvent(requestId, "In progress", "Agents started simulated outreach from chat.");
   const company = firstFilled(fresh.dashboard.values || {}, ["merchantName", "companyName", "providerName", "travelCompany", "cityAgency"]) || "the company";
   addMessage(requestId, "assistant", `Agent work started for ${company}.\n\nResearch agent: checked the policy/context assumptions and proof checklist.\nEmail agent: prepared the outgoing message in the table.\nPhone agent: prepared the call script, including what to say while waiting through hold music.\nTracker agent: status is now In progress. I will not mark it completed unless you confirm the result or upload proof.`, { kind: "agent-run" });
+  return getRequestForUser(requestId, user);
+}
+
+function cancelScheduledCall(user, requestId, requestRecord) {
+  const dashboard = requestRecord.dashboard || {};
+  if (dashboard.persona === "UHC_CLAIM_DENIAL" || dashboard.type === "health_claim") {
+    dashboard.values = { ...(dashboard.values || {}), callStatus: "Cancelled" };
+    db.prepare("UPDATE requests SET dashboard_json = ?, status = ?, updated_at = ? WHERE id = ?")
+      .run(JSON.stringify(dashboard), "Completed", now(), requestId);
+    addStatusEvent(requestId, "Completed", "Scheduled call cancelled in chat.");
+  }
+  addMessage(requestId, "assistant", "Okay, I cancelled this call. Please let me know if there's anything else I can help you with.", { kind: "call-cancelled" });
   return getRequestForUser(requestId, user);
 }
 
@@ -1448,7 +1506,7 @@ async function handleApi(req, res, url) {
         "assistant",
         missing.length
           ? `Saved those details. I still need ${missing.length} more item${missing.length === 1 ? "" : "s"} before I can do the outreach cleanly.`
-          : "Got it. The form is filled enough for me to research and draft the work. Type \"run agents\" when you want me to simulate the calls/emails.",
+          : "Got it. The form is filled enough for me to research and draft the work.",
         { kind: "dashboard-save" }
       );
     }
@@ -1541,7 +1599,6 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, HOST, () => {
-  const displayHost = HOST === "0.0.0.0" ? "127.0.0.1" : HOST;
-  console.log(`CallRunner running at http://${displayHost}:${PORT}`);
+server.listen(PORT, "127.0.0.1", () => {
+  console.log(`CallRunner running at http://127.0.0.1:${PORT}`);
 });

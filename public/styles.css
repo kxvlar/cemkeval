@@ -293,12 +293,6 @@ body.landing-active #heroCanvas {
   line-height: 1.45;
 }
 
-.mini-timeline {
-  display: grid;
-  gap: 0.7rem;
-  padding: 0 1rem 1rem;
-}
-
 .mini-step {
   display: grid;
   grid-template-columns: 22px 1fr;
@@ -1620,7 +1614,7 @@ body {
 .landing-center h1,
 .empty-chat h1 {
   margin: 0;
-  font-size: 2.2rem;
+  font-size: 2.09rem;
   line-height: 1.12;
   letter-spacing: 0;
 }
@@ -1700,10 +1694,9 @@ body {
   background: #ececf1;
 }
 
-.history-item span {
+.history-title-text {
   overflow: hidden;
   white-space: nowrap;
-  text-overflow: ellipsis;
   font-size: 0.88rem;
 }
 
@@ -1719,6 +1712,10 @@ body {
   display: flex;
   align-items: center;
   gap: 0.42rem;
+  min-width: 0;
+}
+
+.history-title-text {
   min-width: 0;
 }
 
@@ -2012,6 +2009,12 @@ body {
   font-weight: 800;
 }
 
+.file-field em {
+  color: #8e8ea0;
+  font-style: italic;
+  font-weight: 500;
+}
+
 .modal-field input,
 .modal-field select,
 .modal-field textarea {
@@ -2189,7 +2192,7 @@ body {
 }
 
 .gpt-app {
-  grid-template-columns: 232px minmax(0, 1fr);
+  grid-template-columns: 260px minmax(0, 1fr);
 }
 
 .gpt-sidebar {
@@ -2210,7 +2213,7 @@ body {
   padding: 0.38rem 0.5rem;
 }
 
-.history-item span {
+.history-title-text {
   font-size: 0.82rem;
 }
 
@@ -2251,34 +2254,6 @@ body {
 .thinking-card {
   display: grid;
   gap: 0.55rem;
-}
-
-.thinking-list {
-  display: grid;
-  gap: 0.25rem;
-  color: #8e8ea0;
-  font-size: 0.92rem;
-}
-
-.thinking-list span {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-}
-
-.thinking-list span::before {
-  content: "";
-  width: 0.34rem;
-  height: 0.34rem;
-  flex: 0 0 auto;
-  border-radius: 999px;
-  background: currentColor;
-  opacity: 0.6;
-}
-
-.thinking-list .current {
-  color: #5f606d;
-  font-weight: 760;
 }
 
 .thinking-cues {
@@ -2406,4 +2381,14 @@ body {
 .mini-thinking {
   border: 0;
   background: transparent;
+}
+
+.gpt-composer textarea {
+  resize: none;
+}
+
+.thinking-line {
+  color: #5f606d;
+  font-size: 0.95rem;
+  font-weight: 720;
 }

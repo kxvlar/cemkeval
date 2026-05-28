@@ -7,8 +7,7 @@ const state = {
   authorizationOpen: false,
   isThinking: false,
   pendingMessage: "",
-  thinkingText: "",
-  thinkingSteps: []
+  thinkingText: ""
 };
 
 const app = document.querySelector("#app");
@@ -35,10 +34,11 @@ const LOCAL_FIELDS = {
   united: {
     type: "health_claim",
     label: "UnitedHealthcare claim denial call",
-    uploadLabel: "Upload denial letter, bill, EOB, or claim screenshot",
+    uploadLabel: "Upload denial letter, bill, EOB, or claim screenshot (optional)",
     fields: [
       { key: "memberFullName", label: "Member full name", type: "text", required: true, question: "What is the member’s full name?" },
       { key: "dateOfBirth", label: "Date of birth", type: "date", required: true, sensitive: true, question: "What is the member’s date of birth?" },
+      { key: "contactEmail", label: "Email", type: "text", required: true, question: "What’s the email you used for your UnitedHealthcare member account?" },
       { key: "uhcMemberId", label: "UHC member ID", type: "text", required: true, sensitive: true, question: "What is the UHC member ID?" },
       { key: "claimId", label: "Claim ID", type: "text", required: true, sensitive: true, question: "What is the claim ID?" },
       { key: "dateOfService", label: "Date of service", type: "date", required: true, question: "What was the date of service?" },
@@ -97,7 +97,7 @@ const LOCAL_FIELDS = {
   },
   general: {
     type: "general",
-    label: "Company task",
+    label: "",
     uploadLabel: "Upload relevant files",
     fields: [
       { key: "companyName", label: "Company/organization", type: "text", required: true, question: "Which company is this for?" },
@@ -108,6 +108,12 @@ const LOCAL_FIELDS = {
       { key: "callScript", label: "Call script", type: "generated", generated: true },
       { key: "emailDraft", label: "Email draft", type: "generated", generated: true }
     ]
+  },
+  smalltalk: {
+    type: "smalltalk",
+    label: "",
+    uploadLabel: "",
+    fields: []
   }
 };
 
@@ -115,12 +121,40 @@ function standaloneLoad() {
   try {
     const storage = window.localStorage;
     const saved = JSON.parse(storage.getItem(LOCAL_KEY) || "null");
-    standaloneMemory = saved || standaloneMemory;
+    standaloneMemory = normalizeStandaloneData(saved || standaloneMemory);
   } catch {
     // Some file previews block browser storage. In that case, keep the demo alive in memory.
+    standaloneMemory = normalizeStandaloneData(standaloneMemory);
   }
   if (!standaloneMemory.user) standaloneMemory.user = defaultUser();
   return standaloneMemory;
+}
+
+function normalizeStandaloneData(data) {
+  const memory = data || { user: defaultUser(), requests: [] };
+  memory.requests = (memory.requests || []).map((request) => {
+    if (request.dashboard?.type === "health_claim") {
+      request.dashboard.label = LOCAL_FIELDS.united.label;
+      request.dashboard.uploadLabel = LOCAL_FIELDS.united.uploadLabel;
+      request.dashboard.fields = LOCAL_FIELDS.united.fields;
+      if (request.dashboard.values?.scheduledCallTime === "2026-05-04T15:00:00Z") {
+        request.dashboard.values.scheduledCallTime = "2026-05-29T12:00:00Z";
+      }
+      if (["In progress", "Completed"].includes(request.status) && !request.dashboard.values?.contactEmail) {
+        request.dashboard.values.contactEmail = memory.user?.email || "on file";
+      }
+      const scheduledBody = healthClaimScheduleMessage();
+      request.messages = (request.messages || []).map((message) => {
+        if (message.sender === "assistant" && /scheduled the call/i.test(message.body || "")) {
+          return { ...message, body: scheduledBody };
+        }
+        return message;
+      }).filter((message) => !(message.sender === "assistant" && /^confirmed\.?$/i.test(message.body || "")));
+    }
+    if (request.dashboard?.type === "general") request.dashboard.label = "";
+    return request;
+  });
+  return memory;
 }
 
 function standaloneSave(data) {
@@ -196,7 +230,7 @@ async function standaloneApi(path, options = {}) {
     localTouch(request);
     request.status = localMissing(request.dashboard).length ? "Waiting for user" : "Drafting";
     if (request.dashboard.type !== "health_claim") {
-      request.messages.push(localMessage("assistant", localMissing(request.dashboard).length ? "Saved. I still need a few details before I can do the outreach cleanly." : "Got it. I have enough to research and draft the work. Type \"run agents\" when you want me to simulate it."));
+      request.messages.push(localMessage("assistant", localMissing(request.dashboard).length ? "Saved. I still need a few details before I can do the outreach cleanly." : "Got it. I have enough to research and draft the work."));
     }
     standaloneSave(data);
     return { request, missing: localMissing(request.dashboard) };
@@ -258,7 +292,29 @@ function localCreateRequest(data, message) {
 function localProcessMessage(data, requestId, message) {
   const request = data.requests.find((item) => item.id === requestId);
   request.messages.push(localMessage("user", message));
-  if (/\b(run agents|do the work|call them|email them|send it|handle it)\b/i.test(message)) {
+  if (isGreeting(message)) {
+    request.messages.push(localMessage("assistant", "Hey, how can I help you today?"));
+  } else if (isCancelCallIntent(message) && request.dashboard?.type === "health_claim") {
+    localCancelCall(request);
+  } else if (request.dashboard?.type === "smalltalk") {
+    const kind = localKind(message);
+    const template = LOCAL_FIELDS[kind];
+    const dashboard = {
+      type: template.type,
+      label: template.label,
+      uploadLabel: template.uploadLabel,
+      fields: template.fields,
+      values: Object.fromEntries(template.fields.map((field) => [field.key, ""])),
+      description: message
+    };
+    Object.assign(dashboard.values, localInfer(kind, message));
+    request.type = template.type;
+    request.title = localTitle(kind, message);
+    request.description = message;
+    request.status = localMissing(dashboard).length ? "Waiting for user" : "Drafting";
+    request.dashboard = dashboard;
+    if (dashboard.type !== "health_claim") request.messages.push(localMessage("assistant", localReply(dashboard, false)));
+  } else if (isRunAgentsIntent(message)) {
     localRunAgents(request);
   } else if (/\b(research|draft|action plan|make plan)\b/i.test(message)) {
     localResearch(request);
@@ -273,7 +329,8 @@ function localProcessMessage(data, requestId, message) {
 
 function localKind(text) {
   const lower = text.toLowerCase();
-  if (/(unitedhealth|united health|unitedhealthcare|uhc|claim denied|denied claim|bill not covered|not covered)/.test(lower)) return "united";
+  if (isGreeting(text)) return "smalltalk";
+  if (isUnitedHealthClaimIntent(text)) return "united";
   if (/(epic|ski|vail|refund|medical issue|doctor)/.test(lower)) return "epic";
   if (/(geico|car insurance|auto policy|cancel)/.test(lower)) return "geico";
   if (/(medical bill|hospital bill|eob|itemized|billing|negotiate)/.test(lower)) return "medical";
@@ -303,6 +360,8 @@ function localInfer(kind, text) {
     updates.desiredOutcome = "Ask for an itemized breakdown, billing review, discount, and payment options.";
   }
   if (kind === "united") {
+    const email = (text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i) || [])[0];
+    if (email) updates.contactEmail = email;
     updates.providerName = (text.match(/(?:provider|hospital|with|from)\s+([A-Z][A-Za-z &.-]+?)(?:\.|,| on| for|$)/) || [])[1] || "";
     const date = (text.match(/\b20\d{2}-\d{2}-\d{2}\b/) || [])[0];
     if (date) updates.dateOfService = date;
@@ -319,6 +378,7 @@ function localInfer(kind, text) {
 }
 
 function localTitle(kind, text) {
+  if (kind === "smalltalk") return "New chat";
   if (kind === "united") return "UnitedHealthcare denied claim call";
   if (kind === "epic") return "EPIC Pass refund request";
   if (kind === "geico") return "Cancel GEICO insurance";
@@ -327,9 +387,10 @@ function localTitle(kind, text) {
 }
 
 function localReply(dashboard, choseDemo) {
+  if (dashboard.type === "smalltalk") return "Hey, how can I help you today?";
   const missing = localMissing(dashboard);
   const demoLine = choseDemo ? "I’ll use a GEICO cancellation for the live demo.\n\n" : "";
-  if (!missing.length) return `${demoLine}I checked the likely support path and have enough to draft the work. Type "run agents" when you want me to simulate the calls/emails.`;
+  if (!missing.length) return `${demoLine}I checked the likely support path and have enough to draft the work. I can prep the call/email work from here.`;
   return `${demoLine}I checked what support will probably ask for. I made the form for this exact task, and I only need these blanks:\n\n${missing.slice(0, 4).map((field) => `- ${field.question || field.label}`).join("\n")}`;
 }
 
@@ -342,7 +403,7 @@ function localResearch(request) {
   request.research = { notes: "Simulated research: checked common support requirements, proof needs, and escalation path." };
   request.plan = { recommendedOutcome: "Ask for the requested outcome, get written confirmation, and keep proof in the task." };
   request.artifacts = { emailBody: localEmail(request), callScript: localCallScript(request) };
-  request.messages.push(localMessage("assistant", "Research is done. I filled the output rows and prepared the email and phone script. Type \"run agents\" to simulate the work."));
+  request.messages.push(localMessage("assistant", "Research is done. I filled the output rows and prepared the email and phone script."));
 }
 
 function localRunAgents(request) {
@@ -350,14 +411,32 @@ function localRunAgents(request) {
   if (request.dashboard.type === "health_claim") {
     request.status = "In progress";
     request.dashboard.values.callStatus = "Call scheduled";
-    request.dashboard.values.scheduledCallTime = "2026-05-04T15:00:00Z";
-    request.messages.push(localMessage("assistant", "I scheduled the call for 2026-05-04T15:00:00Z (8:00 a.m.)."));
+    request.dashboard.values.scheduledCallTime = "2026-05-29T12:00:00Z";
+    request.messages.push(localMessage("assistant", healthClaimScheduleMessage()));
     localTouch(request);
     return;
   }
   if (!request.artifacts) localResearch(request);
   request.status = "In progress";
   request.messages.push(localMessage("assistant", "Agent work started.\n\nResearch agent: checked the likely policy path.\nEmail agent: prepared the message.\nPhone agent: prepared the call script and hold-music plan.\nTracker agent: status is In progress. I won’t mark it completed unless you confirm it."));
+}
+
+function localCancelCall(request) {
+  if (request.dashboard?.type === "health_claim") {
+    request.status = "Completed";
+    request.dashboard.values.callStatus = "Cancelled";
+  }
+  request.messages.push(localMessage("assistant", "Okay, I cancelled this call. Please let me know if there’s anything else I can help you with."));
+}
+
+function healthClaimScheduleMessage() {
+  return [
+    "UnitedHealthcare Member Services 866-801-4409 is closed right now. It opens tomorrow, May 29, 2026, at 8:00 a.m. EST.",
+    "",
+    "I scheduled the call for Friday, May 29, 2026 at 8:00 a.m. EST / 5:00 a.m. PST.",
+    "",
+    "I’ll let you know when the call is done. You can check the status from this chat."
+  ].join("\n");
 }
 
 function localEmail(request) {
@@ -375,6 +454,39 @@ function localMessage(sender, body) {
 
 function localTouch(request) {
   request.updatedAt = new Date().toISOString();
+}
+
+function isGreeting(message) {
+  return /^(hi|hello|hey|heyy|yo|whats up|what's up|whatsups|sup)\s*[!.?]*$/i.test(String(message || "").trim());
+}
+
+function isCancelCallIntent(message) {
+  const normalized = normalizedIntentText(message);
+  const compact = compactIntentText(message);
+  return /(cancel|cancell|cance|calncel|canel|cnacel|cancl|stop|call off|dont call|don t call|remove)/.test(normalized)
+    || /(cancel|cancell|cance|calncel|canel|cnacel|cancl|stop|calloff|dontcall|remove)/.test(compact);
+}
+
+function normalizedIntentText(text) {
+  return String(text || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function compactIntentText(text) {
+  return normalizedIntentText(text).replace(/\s+/g, "");
+}
+
+function isUnitedHealthClaimIntent(text) {
+  const normalized = normalizedIntentText(text);
+  const compact = compactIntentText(text);
+  if (/\b(uhc demo|uhc claim|callrunner uhc|unitedhealth demo|united healthcare demo)\b/.test(normalized)) return true;
+  const companyHit = /\buhc\b|\bu h c\b/.test(normalized)
+    || /\bunited\b/.test(normalized)
+    || /(united|untied|unitd|unietd|unitehd|unirted|unoted|unoithed|unitred).*(health|helath|hearlth|heath|halth|healthcare|halthcare|insur|insuran|insurance)/.test(normalized)
+    || /(health|helath|hearlth|heath|halth|healthcare|insur|insurance).*(united|untied|unitd|unietd|unitehd|unirted|unoted|unoithed|unitred)/.test(normalized)
+    || /(unitedhealth|unoithedhealth|unitredhealth|unitehdhealth|unitehdhearlth|unitedhelath|unitedheath|unitedhealthcare|unitedhalthcare|untiedhealth|untiedhealthcare|unirtedhealth|unotedhealth|uhc)/.test(compact);
+  const claimHit = /(claim|clami|cliam|rejected|rjected|reject|rejects|rejets|denied|deneid|deny|denial|not covered|not coverd|not covred|bill not|bill wasn|bill wasnt|eob|underpaid|under paid|coverage|cover)/.test(normalized)
+    || /(claim|clami|cliam|rejected|rjected|reject|rejets|denied|deneid|denial|notcovered|notcoverd|notcovred|billnot|underpaid|eob)/.test(compact);
+  return companyHit && claimHit;
 }
 
 function escapeHtml(value) {
@@ -482,7 +594,7 @@ async function loadChatData() {
 }
 
 async function renderChatApp() {
-  await loadChatData();
+  if (!state.isThinking) await loadChatData();
   app.innerHTML = shell(`
     <main class="gpt-app">
       <aside class="gpt-sidebar">
@@ -499,7 +611,7 @@ async function renderChatApp() {
           ${state.activeRequest ? renderActiveChat() : renderEmptyChat()}
         </div>
         <form class="gpt-composer" id="chatComposer">
-          <textarea name="message" rows="1" placeholder="${state.activeRequest ? "Message CallRunner, or type run agents" : "Message CallRunner"}"></textarea>
+          <textarea name="message" rows="1" placeholder="Describe your task to get started..."></textarea>
           <button type="submit" aria-label="Send">↑</button>
         </form>
       </section>
@@ -525,10 +637,18 @@ function renderHistory() {
 function renderHistoryItem(request) {
   return `
     <a class="history-item ${state.activeRequest?.id === request.id ? "active" : ""}" href="#/request/${request.id}">
-      <span class="history-title"><i class="status-dot status-${statusSlug(request.status)}"></i>${escapeHtml(request.title)}</span>
+      <span class="history-title" title="${escapeHtml(request.title)}"><i class="status-dot status-${statusSlug(request.status)}"></i><span class="history-title-text">${escapeHtml(shortHistoryTitle(request.title))}</span></span>
       <small>${escapeHtml(request.status)}${request.missingCount ? ` · ${request.missingCount} needed` : ""}</small>
     </a>
   `;
+}
+
+function shortHistoryTitle(title) {
+  const clean = String(title || "New chat").replace(/\s+/g, " ").trim();
+  if (clean.length <= 29) return clean;
+  const clipped = clean.slice(0, 28);
+  const wordSafe = clipped.replace(/\s+\S*$/, "").trim();
+  return `${wordSafe || clipped.trim()}..`;
 }
 
 function statusSlug(status) {
@@ -539,8 +659,7 @@ function renderEmptyChat() {
   return `
     <section class="empty-chat">
       <div class="brand-large"><span class="brand-mark" aria-hidden="true"></span>CallRunner</div>
-      <h1>What can I handle for you?</h1>
-      <p class="quiet-start">Tell me what needs to get done. I’ll check what the company usually asks for before I bother you with questions.</p>
+      <h1>Hi, how can I help you today?</h1>
       ${state.isThinking ? renderPendingThinking() : ""}
     </section>
   `;
@@ -552,7 +671,7 @@ function renderActiveChat() {
     <section class="chat-thread">
       <div class="chat-title">
         <div>
-          <h1>${escapeHtml(request.dashboard.label || request.title)}</h1>
+          <h1>${escapeHtml(displayTitle(request))}</h1>
           <p><span class="status-pill"><i class="status-dot status-${statusSlug(request.status)}"></i>${escapeHtml(request.status)}</span></p>
         </div>
         ${renderHeaderAction(request)}
@@ -568,12 +687,13 @@ function renderActiveChat() {
 function renderHeaderAction(request) {
   const missing = missingFields(request);
   if (missing.length) return `<button class="ghost-button" data-action="open-requirements">Fill missing details</button>`;
-  if (request.dashboard?.type === "health_claim") {
-    return request.status === "In progress"
-      ? `<button class="ghost-button" disabled>Call scheduled</button>`
-      : "";
-  }
+  if (["health_claim", "smalltalk"].includes(request.dashboard?.type)) return "";
   return `<button class="ghost-button" data-action="run-agents">${["In progress", "Completed"].includes(request.status) ? "Agents running" : "Run agents"}</button>`;
+}
+
+function displayTitle(request) {
+  if (request.dashboard?.type === "general" || request.dashboard?.type === "smalltalk") return request.title;
+  return request.dashboard?.label || request.title;
 }
 
 function renderMessage(message) {
@@ -591,7 +711,7 @@ function visibleMessages(request) {
   if (request.dashboard?.type !== "health_claim") return messages;
   return messages.filter((message) => {
     if (message.sender === "user") return true;
-    return /scheduled the call/i.test(message.body || "");
+    return /scheduled the call|cancelled this call/i.test(message.body || "");
   });
 }
 
@@ -622,12 +742,9 @@ function renderPendingThinking() {
 }
 
 function renderThinkingContent() {
-  const steps = state.thinkingSteps.length ? state.thinkingSteps : [state.thinkingText || "Reading..."];
   return `
     <div class="thinking-card">
-      <div class="thinking-list">
-        ${steps.map((step, index) => `<span class="${index === steps.length - 1 ? "current" : ""}">${escapeHtml(step)}</span>`).join("")}
-      </div>
+      <div class="thinking-line">${escapeHtml(state.thinkingText || "Searching the web...")}</div>
       <div class="thinking-cues" aria-hidden="true"><span></span><span></span><span></span></div>
     </div>
   `;
@@ -635,6 +752,7 @@ function renderThinkingContent() {
 
 function renderTaskCard(request) {
   const missing = missingFields(request);
+  if (request.dashboard.type === "smalltalk") return "";
   if (missing.length) {
     return `
       <div class="inline-task-card">
@@ -654,14 +772,6 @@ function renderTaskCard(request) {
     `;
   }
   if (request.dashboard.type === "health_claim") {
-    if (request.status === "In progress") {
-      return `
-        <div class="inline-task-card">
-          <strong>Call scheduled</strong>
-          <span>2026-05-04T15:00:00Z · 8:00 a.m.</span>
-        </div>
-      `;
-    }
     return "";
   }
   return `
@@ -684,14 +794,14 @@ function renderRequirementsModal() {
         <div class="modal-head">
           <div>
             <h2>Fill the missing details</h2>
-            <p>${escapeHtml(request.dashboard.label)} · ${missing.length} item${missing.length === 1 ? "" : "s"}</p>
+            <p>${escapeHtml(displayTitle(request))} · ${missing.length} item${missing.length === 1 ? "" : "s"}</p>
           </div>
           <button class="icon-button" data-action="close-requirements" aria-label="Close">×</button>
         </div>
         <form id="requirementsForm" class="missing-form">
           ${missing.map(renderMissingField).join("")}
           <label class="file-field">
-            <span>${escapeHtml(request.dashboard.uploadLabel || "Upload files")}</span>
+            <span>${renderUploadLabel(request.dashboard.uploadLabel || "Upload files")}</span>
             <input id="fileInput" type="file" multiple>
           </label>
           <div class="modal-actions">
@@ -702,6 +812,13 @@ function renderRequirementsModal() {
       </section>
     </div>
   `;
+}
+
+function renderUploadLabel(label) {
+  const text = String(label || "");
+  const optionalMatch = text.match(/^(.*)\s+\((optional)\)$/i);
+  if (!optionalMatch) return escapeHtml(text);
+  return `${escapeHtml(optionalMatch[1])} <em>${escapeHtml(optionalMatch[2])}</em>`;
 }
 
 function renderAuthorizationModal() {
@@ -744,7 +861,7 @@ function authorizationName(request) {
 }
 
 function renderMissingField(field) {
-  const label = `${escapeHtml(field.label)}${field.sensitive ? ` <span class="sensitive">Sensitive</span>` : ""}`;
+  const label = escapeHtml(field.label);
   if (field.type === "textarea") {
     return `
       <label class="modal-field">
@@ -836,15 +953,20 @@ async function sendChat(message, requestId) {
     state.requirementsOpen = false;
     state.authorizationOpen = false;
     state.pendingMessage = message;
-    state.thinkingText = "Reading...";
-    state.thinkingSteps = [];
+    state.thinkingText = isGreeting(message) ? "Reading..." : "Searching the web...";
     renderChatApp();
-    await playThinkingSequence(requestId);
+    const cancelIntent = requestId && isCancelCallIntent(message) && state.activeRequest?.dashboard?.type === "health_claim";
+    if (cancelIntent) {
+      state.thinkingText = "Cancelling the call...";
+      renderChatApp();
+      await sleep(1000);
+    } else {
+      await playThinkingSequence(requestId);
+    }
     if (requestId && isRunAgentsIntent(message) && needsAuthorization(state.activeRequest)) {
       state.isThinking = false;
       state.pendingMessage = "";
       state.thinkingText = "";
-      state.thinkingSteps = [];
       state.authorizationOpen = true;
       renderChatApp();
       return;
@@ -856,14 +978,12 @@ async function sendChat(message, requestId) {
     state.isThinking = false;
     state.pendingMessage = "";
     state.thinkingText = "";
-    state.thinkingSteps = [];
     navigate(`/request/${result.request.id}`);
     renderChatApp();
   } catch (error) {
     state.isThinking = false;
     state.pendingMessage = "";
     state.thinkingText = "";
-    state.thinkingSteps = [];
     showToast(error.message);
     renderChatApp();
   }
@@ -871,19 +991,43 @@ async function sendChat(message, requestId) {
 
 async function playThinkingSequence(requestId) {
   const lower = state.pendingMessage.toLowerCase();
-  const companyMatch = lower.match(/\b(geico|epic pass|epic|vail|kaiser|aetna|anthem|comcast|xfinity|verizon|at&t|delta|united|american airlines)\b/i)?.[0];
+  if (isGreeting(state.pendingMessage)) {
+    state.thinkingText = "Reading...";
+    renderChatApp();
+    await sleep(550);
+    return;
+  }
+  const isUnited = isUnitedHealthClaimIntent(state.pendingMessage)
+    || state.activeRequest?.dashboard?.type === "health_claim";
+  const companyMatch = lower.match(/\b(geico|epic pass|epic|vail|kaiser|aetna|anthem|comcast|xfinity|verizon|at&t|delta|united|unitedhealthcare|uhc|american airlines)\b/i)?.[0];
   const company = companyMatch ? companyMatch.replace(/\b\w/g, (char) => char.toUpperCase()) : "";
-  const steps = [
-    "Reading...",
-    company ? `Checking ${company}...` : "Checking the basics...",
+  const steps = isUnited ? [
+    "Searching the web...",
+    "Got it. This sounds like a denied or underpaid claim.",
+    "Checking UnitedHealthcare Member Services...",
+    "I’m checking what UHC usually needs to look up a denied claim.",
+    "Reading the basics...",
+    "I’m figuring out which details are needed before calling.",
+    "The likely missing pieces are claim ID, service date, provider name, and member ID.",
+    "I’m checking what the EOB says.",
+    "Checking the phone line hours...",
+    "The line is closed right now.",
+    "I’m preparing the questions that will get us a clear answer from UHC.",
+    requestId ? "Checking the call window..." : "Making the form..."
+  ] : [
+    "Searching the web...",
+    "Reading your request...",
+    company ? `Checking ${company}...` : "Checking the company...",
+    "Checking the basics...",
+    "Looking for the required details...",
     "Finding blanks...",
+    "Preparing the form...",
     requestId ? "Updating..." : "Making the form..."
   ];
   for (const step of steps) {
     state.thinkingText = step;
-    state.thinkingSteps = [...state.thinkingSteps, step].slice(-4);
     renderChatApp();
-    await sleep(1550 + Math.floor(Math.random() * 900));
+    await sleep(820 + Math.floor(Math.random() * 360));
   }
 }
 
@@ -892,7 +1036,7 @@ function sleep(ms) {
 }
 
 function isRunAgentsIntent(message) {
-  return /\b(run agents|do the work|call them|email them|send it|handle it|schedule call|schedule the call)\b/i.test(message);
+  return /\b(run agents|do the work|call them|email them|send it|handle it|schedule call|schedule the call|schedule a call|schedule it|start the call)\b/i.test(message);
 }
 
 function needsAuthorization(request) {
@@ -909,13 +1053,11 @@ async function confirmAuthorizationAndRun(event) {
   state.authorizationOpen = false;
   state.isThinking = true;
   state.pendingMessage = "";
-  state.thinkingSteps = [];
-  const steps = ["Checking consent...", "Scheduling call..."];
+  const steps = ["Checking consent...", "Checking UHC hours...", "Scheduling for tomorrow...", "Confirming..."];
   for (const step of steps) {
     state.thinkingText = step;
-    state.thinkingSteps = [...state.thinkingSteps, step];
     renderChatApp();
-    await sleep(1500 + Math.floor(Math.random() * 700));
+    await sleep(1450 + Math.floor(Math.random() * 850));
   }
   const result = await api(`/api/requests/${state.activeRequest.id}/agent-run`, {
     method: "POST",
@@ -925,7 +1067,6 @@ async function confirmAuthorizationAndRun(event) {
   state.requests = (await api("/api/requests")).requests;
   state.isThinking = false;
   state.thinkingText = "";
-  state.thinkingSteps = [];
   renderChatApp();
 }
 
@@ -941,18 +1082,15 @@ async function saveRequirements(event) {
   if (state.activeRequest.dashboard?.type === "health_claim" && !state.requirementsOpen) {
     state.isThinking = true;
     state.pendingMessage = "";
-    state.thinkingText = "Checking...";
-    state.thinkingSteps = [];
+    state.thinkingText = "Searching the web...";
     renderChatApp();
-    for (const step of ["Checking...", "Preparing consent..."]) {
+    for (const step of ["Searching the web...", "Checking UHC hours...", "The line is closed right now.", "Preparing authorization..."]) {
       state.thinkingText = step;
-      state.thinkingSteps = [...state.thinkingSteps, step];
       renderChatApp();
-      await sleep(1300 + Math.floor(Math.random() * 700));
+      await sleep(1450 + Math.floor(Math.random() * 850));
     }
     state.isThinking = false;
     state.thinkingText = "";
-    state.thinkingSteps = [];
     state.authorizationOpen = true;
     renderChatApp();
     return;
