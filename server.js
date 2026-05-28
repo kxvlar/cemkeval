@@ -15,6 +15,7 @@ const DATA_DIR = path.join(ROOT, "data");
 const UPLOAD_DIR = path.join(DATA_DIR, "uploads");
 const DB_PATH = path.join(DATA_DIR, "pine-agent.sqlite");
 const PORT = Number(process.env.PORT || 3000);
+const HOST = "0.0.0.0";
 
 mkdirSync(DATA_DIR, { recursive: true });
 mkdirSync(UPLOAD_DIR, { recursive: true });
@@ -1599,6 +1600,6 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, "127.0.0.1", () => {
-  console.log(`CallRunner running at http://127.0.0.1:${PORT}`);
+server.listen(PORT, HOST, () => {
+  console.log(`CallRunner listening on ${HOST}:${PORT}`);
 });
